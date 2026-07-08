@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-TEAM = "SC Heerenveen"
+TEAM_KEYWORDS = ["heerenveen", "sc heerenveen"]
 OUTPUT = Path("heerenveen.ics")
 TZ = ZoneInfo("Europe/Amsterdam")
 
@@ -19,6 +19,12 @@ SEASONS = [
 
 BASE_URL = "https://raw.githubusercontent.com/openfootball/europe/master/netherlands/{season}_nl1.txt"
 
+MONTHS = {
+    "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4,
+    "May": 5, "Jun": 6, "Jul": 7, "Aug": 8,
+    "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+}
+
 
 @dataclass
 class Match:
@@ -28,7 +34,7 @@ class Match:
 
     @property
     def is_home(self) -> bool:
-        return TEAM.lower() in self.home.lower()
+        return "heerenveen" in self.home.lower()
 
     @property
     def title(self) -> str:
@@ -42,35 +48,32 @@ def fetch_text(url: str) -> str | None:
             if response.status == 200:
                 return response.read().decode("utf-8")
     except Exception as exc:
-        print(f"Kon bron niet ophalen: {url} ({exc})")
+        print(f"Bron niet beschikbaar: {url} ({exc})")
     return None
 
 
-def parse_date_header(line: str, season_year: int) -> datetime | None:
-    match = re.match(r"\[(?:\w+\s+)?([A-Za-z]{3})/(\d{1,2})\]", line.strip())
+def parse_date_line(line: str, season_year: int) -> datetime | None:
+    match = re.match(r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+([A-Z][a-z]{2})\s+(\d{1,2})$", line.strip())
     if not match:
         return None
 
-    month_name, day = match.groups()
-    month = datetime.strptime(month_name, "%b").month
+    _, month_name, day = match.groups()
+    month = MONTHS[month_name]
     year = season_year if month >= 7 else season_year + 1
+
     return datetime(year, month, int(day), tzinfo=TZ)
 
 
 def parse_match_line(line: str, current_date: datetime | None) -> Match | None:
-    if not current_date:
+    if current_date is None:
         return None
 
-    parts = re.split(r"\s{2,}", line.strip())
-    if len(parts) < 3:
+    line = line.strip()
+    match = re.match(r"^(\d{1,2}:\d{2})\s+(.+?)\s+v\s+(.+?)(?:\s+\d.*)?$", line)
+    if not match:
         return None
 
-    time_part = parts[0].replace(".", ":")
-    if not re.match(r"^\d{1,2}:\d{2}$", time_part):
-        return None
-
-    home = parts[1].strip()
-    away = parts[-1].strip()
+    time_part, home, away = match.groups()
 
     if "heerenveen" not in home.lower() and "heerenveen" not in away.lower():
         return None
@@ -78,11 +81,7 @@ def parse_match_line(line: str, current_date: datetime | None) -> Match | None:
     hour, minute = map(int, time_part.split(":"))
     start = current_date.replace(hour=hour, minute=minute)
 
-    return Match(start=start, home=home, away=away)
-
-
-def ics_datetime(dt: datetime) -> str:
-    return dt.strftime("%Y%m%dT%H%M%S")
+    return Match(start=start, home=home.strip(), away=away.strip())
 
 
 def escape_ics(text: str) -> str:
@@ -94,7 +93,11 @@ def escape_ics(text: str) -> str:
     )
 
 
-def make_ics(matches: list[Match]) -> str:
+def ics_time(dt: datetime) -> str:
+    return dt.strftime("%Y%m%dT%H%M%S")
+
+
+def make_ics(matches: list[Match], season: str) -> str:
     now = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
     lines = [
@@ -107,62 +110,62 @@ def make_ics(matches: list[Match]) -> str:
         "X-WR-TIMEZONE:Europe/Amsterdam",
     ]
 
-    for match in matches:
-        end = match.start + timedelta(hours=2)
-        uid = f"{match.start.strftime('%Y%m%d%H%M')}-{match.home}-{match.away}@abe-agenda"
-        lines.extend(
-            [
-                "BEGIN:VEVENT",
-                f"UID:{escape_ics(uid)}",
-                f"DTSTAMP:{now}",
-                f"DTSTART;TZID=Europe/Amsterdam:{ics_datetime(match.start)}",
-                f"DTEND;TZID=Europe/Amsterdam:{ics_datetime(end)}",
-                f"SUMMARY:{escape_ics(match.title)}",
-                f"DESCRIPTION:{escape_ics('Abe Agenda - automatisch gegenereerde SC Heerenveen-kalender.')}",
-                "END:VEVENT",
-            ]
-        )
+    for m in matches:
+        end = m.start + timedelta(hours=2)
+        uid_base = f"{m.start:%Y%m%d%H%M}-{m.home}-{m.away}".lower()
+        uid_base = re.sub(r"[^a-z0-9]+", "-", uid_base).strip("-")
+
+        lines.extend([
+            "BEGIN:VEVENT",
+            f"UID:{uid_base}@abe-agenda",
+            f"DTSTAMP:{now}",
+            f"DTSTART;TZID=Europe/Amsterdam:{ics_time(m.start)}",
+            f"DTEND;TZID=Europe/Amsterdam:{ics_time(end)}",
+            f"SUMMARY:{escape_ics(m.title)}",
+            f"DESCRIPTION:{escape_ics(f'Abe Agenda - SC Heerenveen kalender. Bron: OpenFootball. Seizoen: {season}.')}",
+            "END:VEVENT",
+        ])
 
     lines.append("END:VCALENDAR")
     return "\r\n".join(lines) + "\r\n"
 
 
-def main() -> int:
-    all_matches: list[Match] = []
+def parse_season(text: str, season_year: int) -> list[Match]:
+    matches: list[Match] = []
+    current_date: datetime | None = None
 
+    for line in text.splitlines():
+        date = parse_date_line(line, season_year)
+        if date:
+            current_date = date
+            continue
+
+        match = parse_match_line(line, current_date)
+        if match:
+            matches.append(match)
+
+    return sorted(matches, key=lambda m: m.start)
+
+
+def main() -> int:
     for season, season_year in SEASONS:
         url = BASE_URL.format(season=season)
-        print(f"Controleer seizoen {season}: {url}")
-        text = fetch_text(url)
+        print(f"Controleer {season}: {url}")
 
+        text = fetch_text(url)
         if not text:
             continue
 
-        current_date = None
-        matches: list[Match] = []
-
-        for line in text.splitlines():
-            date_header = parse_date_header(line, season_year)
-            if date_header:
-                current_date = date_header
-                continue
-
-            match = parse_match_line(line, current_date)
-            if match:
-                matches.append(match)
+        matches = parse_season(text, season_year)
 
         if matches:
-            print(f"{len(matches)} wedstrijden gevonden voor {season}.")
-            all_matches = matches
-            break
+            OUTPUT.write_text(make_ics(matches, season), encoding="utf-8")
+            print(f"{OUTPUT} bijgewerkt met {len(matches)} wedstrijden voor {season}.")
+            return 0
 
-    if not all_matches:
-        print("Geen SC Heerenveen-wedstrijden gevonden. Bestaande heerenveen.ics blijft behouden.")
-        return 0
+        print(f"Geen SC Heerenveen-wedstrijden gevonden voor {season}.")
 
-    all_matches.sort(key=lambda m: m.start)
-    OUTPUT.write_text(make_ics(all_matches), encoding="utf-8")
-    print(f"{OUTPUT} bijgewerkt met {len(all_matches)} wedstrijden.")
+    print("Geen bruikbare wedstrijden gevonden. Bestaande heerenveen.ics blijft behouden.")
     return 0
 
 
