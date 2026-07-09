@@ -1,13 +1,15 @@
-name: Test Abe Agenda generator
+name: Update Abe Agenda
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * *"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  test-generator:
+  update-calendar:
     runs-on: ubuntu-latest
 
     steps:
@@ -22,7 +24,8 @@ jobs:
       - name: Run generator
         run: python update_calendar.py
 
-      - name: Show generated files
-        run: |
-          ls -la
-          head -40 heerenveen.ics
+      - name: Commit updated calendar
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update Abe Agenda calendar"
+          file_pattern: heerenveen.ics
